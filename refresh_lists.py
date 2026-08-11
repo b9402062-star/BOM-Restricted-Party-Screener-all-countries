@@ -207,7 +207,7 @@ CSL_NOTES = {
     "OFAC Palestinian Legislative Council List": "Confirm current status against OFAC before compliance use.",
     "OFAC Capta List": "Correspondent/payable-through account restrictions only, not a full blocking sanction.",
     "BIS Entity List": "Presence triggers an EAR license requirement, often with a policy of denial. Confirm current terms against bis.gov before compliance use.",
-    "BIS Denied Persons List": "Denial orders generally deny all export privileges. Confirm current order terms/expiration against bis.gov.",
+    "BIS Denied Persons List": "Denial orders generally deny all export privileges. Orders with an end_date already in the past are excluded from this list (the CSL bulk file retains expired orders for archival search, but they are no longer in force) - only currently-active orders are included. Confirm current order terms/expiration against bis.gov.",
     "BIS Unverified List": "A 'Red Flag' BIS could not resolve in a prior transaction - not a per-se export prohibition.",
     "BIS Military End User (MEU) List": "Triggers an EAR license requirement for items subject to the EAR destined to that end user.",
 }
@@ -222,12 +222,32 @@ def fetch_csl():
     def keep(r):
         t = r.get("type", "")
         if t == "Entity":
-            return True
-        if t in ("Individual", "Vessel", "Aircraft"):
+            pass
+        elif t in ("Individual", "Vessel", "Aircraft"):
             return False
-        if t == "":
-            return looks_like_entity(r.get("name", ""))
-        return False
+        elif t == "":
+            if not looks_like_entity(r.get("name", "")):
+                return False
+        else:
+            return False
+
+        # BIS Denied Persons List denial orders carry a fixed start_date/end_date
+        # (unlike SDN/Entity List designations, which are open-ended until formally
+        # delisted). The CSL bulk file keeps expired orders for historical/archival
+        # search - trade.gov's own DPL page filters these out, and so must we, or
+        # we'd flag companies whose denial order lapsed years ago as currently
+        # restricted. Confirmed via a live discrepancy: "Realtek Semi-Conductor Co.
+        # Ltd" appeared in our BIS DPL data with end_date 2000-08-03 (expired 26
+        # years ago) despite not appearing on bis.gov's current DPL page.
+        end_date = clean(r.get("end_date"))
+        if end_date:
+            try:
+                if datetime.strptime(end_date, "%Y-%m-%d").date() < datetime.now(timezone.utc).date():
+                    return False
+            except ValueError:
+                pass  # unparseable date - don't let a formatting quirk silently drop a real record
+
+        return True
 
     by_source = {v: [] for v in SOURCE_MAP.values()}
     seen = set()
@@ -246,6 +266,9 @@ def fetch_csl():
         scope_parts = [clean(r.get(f)) for f in ("programs", "license_requirement", "license_policy")]
         scope_parts = [p for p in scope_parts if p]
         scope = " | ".join(scope_parts) if scope_parts else slist
+        end_date = clean(r.get("end_date"))
+        if end_date:
+            scope = f"{scope} (denial order in effect through {end_date})" if scope_parts else f"Denial order in effect through {end_date}"
 
         by_source[slist].append(rec(
             slist, name, clean(r.get("alt_names")), "Entity", "", clean(r.get("addresses")),
@@ -643,7 +666,7 @@ def main():
     #     blank out the other nine.
     csl_labels = list(SOURCE_MAP.values())
     csl_min_expected = {
-        "OFAC SDN List": 5000, "BIS Entity List": 1000, "BIS Denied Persons List": 200,
+        "OFAC SDN List": 5000, "BIS Entity List": 1000, "BIS Denied Persons List": 20,
         "OFAC Sectoral Sanctions (SSI) List": 100, "BIS Unverified List": 50,
         "BIS Military End User (MEU) List": 20, "OFAC Non-SDN Chinese Military-Industrial Complex (CMIC) List": 20,
         "OFAC Non-SDN Menu-Based Sanctions List": 1, "OFAC Palestinian Legislative Council List": 0,
